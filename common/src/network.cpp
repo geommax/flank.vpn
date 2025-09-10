@@ -250,7 +250,22 @@ ssize_t NetworkManager::send(const void* data, size_t length) {
         return -1;
     }
 
-    ssize_t bytes_sent = ::send(pimpl->socket_fd, data, length, MSG_NOSIGNAL);
+    ssize_t bytes_sent;
+    if (pimpl->current_protocol == ProtocolType::UDP) {
+        // For UDP, use sendto with destination address
+        try {
+            struct sockaddr_in addr = pimpl->create_sockaddr(pimpl->remote_endpoint.host, pimpl->remote_endpoint.port);
+            bytes_sent = ::sendto(pimpl->socket_fd, data, length, MSG_NOSIGNAL, 
+                                (struct sockaddr*)&addr, sizeof(addr));
+        } catch (const std::exception& e) {
+            LOG_ERROR("Failed to create destination address: " + std::string(e.what()));
+            return -1;
+        }
+    } else {
+        // For TCP, use regular send
+        bytes_sent = ::send(pimpl->socket_fd, data, length, MSG_NOSIGNAL);
+    }
+    
     if (bytes_sent < 0) {
         LOG_ERROR("Send failed: " + std::string(strerror(errno)));
     }
@@ -262,7 +277,18 @@ ssize_t NetworkManager::receive(void* buffer, size_t buffer_size) {
         return -1;
     }
 
-    ssize_t bytes_received = ::recv(pimpl->socket_fd, buffer, buffer_size, 0);
+    ssize_t bytes_received;
+    if (pimpl->current_protocol == ProtocolType::UDP) {
+        // For UDP, use recvfrom
+        struct sockaddr_in from_addr{};
+        socklen_t from_len = sizeof(from_addr);
+        bytes_received = ::recvfrom(pimpl->socket_fd, buffer, buffer_size, 0, 
+                                  (struct sockaddr*)&from_addr, &from_len);
+    } else {
+        // For TCP, use regular recv
+        bytes_received = ::recv(pimpl->socket_fd, buffer, buffer_size, 0);
+    }
+    
     if (bytes_received < 0) {
         LOG_ERROR("Receive failed: " + std::string(strerror(errno)));
     }

@@ -191,16 +191,64 @@ private:
     void server_worker() {
         LOG_INFO("Server worker thread started");
         
-        uint8_t buffer[4096];
         while (running_) {
-            // Simple UDP packet reception for now
-            ssize_t bytes_received = network_manager_->receive(buffer, sizeof(buffer));
+            // Receive packet from client
+            std::vector<uint8_t> packet_data;
+            PacketHeader header;
+            
+            ssize_t bytes_received = network_manager_->receive_packet(packet_data, header);
             if (bytes_received > 0) {
-                LOG_DEBUG("Received " + std::to_string(bytes_received) + " bytes from client");
+                LOG_DEBUG("Received packet from client: type=" + std::to_string(header.type) + 
+                         ", length=" + std::to_string(header.length));
+                
                 total_bytes_transferred_ += bytes_received;
                 
-                // Echo back for testing (TODO: Implement proper VPN protocol)
-                network_manager_->send(buffer, bytes_received);
+                // Handle different packet types
+                switch (static_cast<PacketType>(header.type)) {
+                    case PacketType::HANDSHAKE_INIT: {
+                        LOG_INFO("Received client handshake");
+                        if (!packet_data.empty()) {
+                            std::string hello_msg(packet_data.begin(), packet_data.end());
+                            LOG_INFO("Client hello: " + hello_msg);
+                        }
+                        
+                        // Send handshake response
+                        std::string response = "FLUNK_SERVER_HELLO:Welcome";
+                        std::vector<uint8_t> response_data(response.begin(), response.end());
+                        network_manager_->send_packet(response_data, PacketType::HANDSHAKE_RESPONSE, header.sequence + 1);
+                        
+                        current_active_clients_ = 1; // Simple single-client handling for now
+                        total_clients_served_++;
+                        LOG_INFO("Sent handshake response to client");
+                        break;
+                    }
+                    
+                    case PacketType::DATA: {
+                        LOG_DEBUG("Received data packet from client");
+                        // Echo data back (tunnel simulation)
+                        network_manager_->send_packet(packet_data, PacketType::DATA, header.sequence + 1);
+                        break;
+                    }
+                    
+                    case PacketType::KEEPALIVE: {
+                        LOG_DEBUG("Received keepalive from client");
+                        // Send keepalive response
+                        std::vector<uint8_t> keepalive_data;
+                        network_manager_->send_packet(keepalive_data, PacketType::KEEPALIVE, header.sequence + 1);
+                        break;
+                    }
+                    
+                    case PacketType::DISCONNECT: {
+                        LOG_INFO("Client requested disconnect");
+                        current_active_clients_ = 0;
+                        break;
+                    }
+                    
+                    default:
+                        LOG_WARN("Unknown packet type received: " + std::to_string(header.type));
+                        break;
+                }
+                
             } else if (bytes_received < 0) {
                 // Non-blocking socket would return -1 with EAGAIN/EWOULDBLOCK
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));

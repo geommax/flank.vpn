@@ -1,8 +1,11 @@
 #include "vpn_client.h"
 #include "flunk/logger.h"
 #include "flunk/utils.h"
+#include "flunk/network.h"
+#include "flunk/config.h"
 #include <chrono>
 #include <thread>
+#include <memory>
 
 namespace flunk {
 
@@ -10,7 +13,11 @@ namespace flunk {
 class VPNClient::Impl {
 public:
     Impl() : connected_(false), tunnel_active_(false), auto_reconnect_(false),
-             retry_interval_(30), connection_time_(0), last_activity_(0) {}
+             retry_interval_(30), evasion_enabled_(false), 
+             config_manager_(std::make_unique<ConfigManager>()),
+             network_manager_(std::make_unique<NetworkManager>()),
+             tun_interface_(std::make_unique<TunInterface>()),
+             connection_time_(0), last_activity_(0) {}
     
     ~Impl() {
         disconnect();
@@ -20,15 +27,18 @@ public:
         config_file_ = config_file;
         LOG_INFO("Client initializing with config: " + config_file);
         
-        // TODO: Load and parse configuration file
-        // TODO: Initialize network components
-        // TODO: Setup cryptographic components
+        // Load configuration file if it exists
+        if (!config_file.empty() && config_manager_->load_from_file(config_file)) {
+            LOG_INFO("Configuration loaded successfully");
+        } else {
+            LOG_WARN("Using default configuration");
+        }
         
         return true;
     }
     
     bool connect_to_server(const std::string& server_host, uint16_t server_port, 
-                          const std::string& username, const std::string& /* password */) {
+                          const std::string& username, const std::string& password) {
         if (connected_) {
             LOG_WARN("Client is already connected");
             return false;
@@ -37,17 +47,55 @@ public:
         LOG_INFO("Connecting to server " + server_host + ":" + std::to_string(server_port));
         server_address_ = server_host + ":" + std::to_string(server_port);
         username_ = username;
+        password_ = password;
         
-        // TODO: Implement actual connection logic
-        // TODO: Perform authentication
-        // TODO: Exchange cryptographic keys
+        // Create network endpoint
+        NetworkEndpoint endpoint;
+        endpoint.host = server_host;
+        endpoint.port = server_port;
+        endpoint.protocol = ProtocolType::UDP;
         
-        connected_ = true;
-        connection_time_ = time(nullptr);
-        last_activity_ = connection_time_;
+        // Connect to server
+        if (!network_manager_->connect(endpoint)) {
+            LOG_ERROR("Failed to connect to server");
+            return false;
+        }
         
-        LOG_INFO("Connected to server successfully");
-        return true;
+        LOG_INFO("Network connection established");
+        
+        // Send test packet to server
+        std::string test_message = "FLUNK_CLIENT_HELLO:" + username;
+        std::vector<uint8_t> hello_data(test_message.begin(), test_message.end());
+        
+        ssize_t sent = network_manager_->send_packet(hello_data, PacketType::HANDSHAKE_INIT, 1);
+        if (sent <= 0) {
+            LOG_ERROR("Failed to send hello packet to server");
+            network_manager_->disconnect();
+            return false;
+        }
+        
+        LOG_INFO("Hello packet sent to server (" + std::to_string(sent) + " bytes)");
+        
+        // Wait for server response
+        std::vector<uint8_t> response_data;
+        PacketHeader response_header;
+        
+        network_manager_->set_receive_timeout(5000); // 5 second timeout
+        ssize_t received = network_manager_->receive_packet(response_data, response_header);
+        
+        if (received > 0) {
+            LOG_INFO("Received response from server (" + std::to_string(received) + " bytes)");
+            connected_ = true;
+            connection_time_ = time(nullptr);
+            last_activity_ = connection_time_;
+            
+            LOG_INFO("Successfully connected to server");
+            return true;
+        } else {
+            LOG_ERROR("No response from server or connection failed");
+            network_manager_->disconnect();
+            return false;
+        }
     }
     
     bool disconnect() {
@@ -57,11 +105,18 @@ public:
         
         LOG_INFO("Disconnecting from server...");
         
-        // TODO: Gracefully close tunnel
-        // TODO: Close network connections
-        // TODO: Cleanup resources
+        // Tear down tunnel first
+        tear_down_tunnel();
         
-        tunnel_active_ = false;
+        // Send disconnect packet
+        if (network_manager_->is_connected()) {
+            std::vector<uint8_t> disconnect_data;
+            network_manager_->send_packet(disconnect_data, PacketType::DISCONNECT, 0);
+        }
+        
+        // Close network connection
+        network_manager_->disconnect();
+        
         connected_ = false;
         server_address_.clear();
         assigned_ip_.clear();
@@ -99,14 +154,38 @@ public:
         
         LOG_INFO("Establishing VPN tunnel...");
         
-        // TODO: Create TUN interface
-        // TODO: Configure routing
-        // TODO: Start packet forwarding
+        // Create client TUN interface
+        if (!tun_interface_->create_interface("flunk-client")) {
+            LOG_ERROR("Failed to create TUN interface");
+            return false;
+        }
+        
+        // Configure TUN interface with client IP
+        std::string client_ip = "10.8.0.10"; // Client IP in VPN subnet
+        if (!tun_interface_->configure_ip(client_ip, "24")) {
+            LOG_ERROR("Failed to configure TUN interface IP");
+            return false;
+        }
+        
+        // Bring up the interface
+        if (!tun_interface_->bring_up()) {
+            LOG_ERROR("Failed to bring up TUN interface");
+            return false;
+        }
+        
+        // Add route through VPN gateway
+        std::string vpn_gateway = "10.8.0.1";
+        if (!tun_interface_->add_route("0.0.0.0/0", vpn_gateway)) {
+            LOG_WARN("Failed to add default route through VPN");
+        }
         
         tunnel_active_ = true;
-        assigned_ip_ = "10.8.0.2"; // Stub IP assignment
+        assigned_ip_ = client_ip;
+        client_interface_ = tun_interface_->get_interface_name();
         
-        LOG_INFO("VPN tunnel established successfully");
+        LOG_INFO("VPN tunnel established successfully on interface " + client_interface_);
+        LOG_INFO("Assigned IP: " + assigned_ip_);
+        
         return true;
     }
     
@@ -117,12 +196,14 @@ public:
         
         LOG_INFO("Tearing down VPN tunnel...");
         
-        // TODO: Remove routes
-        // TODO: Destroy TUN interface
-        // TODO: Stop packet forwarding
+        // Bring down TUN interface
+        if (tun_interface_) {
+            tun_interface_->bring_down();
+        }
         
         tunnel_active_ = false;
         assigned_ip_.clear();
+        client_interface_.clear();
         
         LOG_INFO("VPN tunnel torn down");
         return true;
@@ -153,7 +234,7 @@ public:
     }
     
     std::string get_tunnel_interface() const {
-        return tunnel_active_ ? "tun0" : "";
+        return tunnel_active_ ? client_interface_ : "";
     }
     
     VPNClient::ClientStats get_statistics() const {
@@ -194,9 +275,16 @@ private:
     int retry_interval_;
     bool evasion_enabled_ = false;
     
+    // Network components
+    std::unique_ptr<ConfigManager> config_manager_;
+    std::unique_ptr<NetworkManager> network_manager_;
+    std::unique_ptr<TunInterface> tun_interface_;
+    
     std::string server_address_;
     std::string username_;
+    std::string password_;
     std::string assigned_ip_;
+    std::string client_interface_;
     
     time_t connection_time_;
     time_t last_activity_;
