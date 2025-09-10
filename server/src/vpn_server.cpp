@@ -1,15 +1,21 @@
 #include "vpn_server.h"
 #include "flunk/logger.h"
 #include "flunk/utils.h"
+#include "flunk/network.h"
+#include "flunk/config.h"
 #include <chrono>
 #include <thread>
+#include <memory>
+#include <mutex>
 
 namespace flunk {
 
 // VPNServer::Impl class for pimpl pattern
 class VPNServer::Impl {
 public:
-    Impl() : running_(false), start_time_(0) {}
+    Impl() : running_(false), start_time_(0), config_manager_(std::make_unique<ConfigManager>()),
+             network_manager_(std::make_unique<NetworkManager>()),
+             tun_interface_(std::make_unique<TunInterface>()) {}
     
     ~Impl() {
         stop();
@@ -19,10 +25,23 @@ public:
         config_file_ = config_file;
         LOG_INFO("Server initializing with config: " + config_file);
         
-        // TODO: Load and parse configuration file
-        // TODO: Initialize network interfaces
-        // TODO: Setup cryptographic components
+        // Load configuration file
+        if (!config_manager_->load_from_file(config_file)) {
+            LOG_ERROR("Failed to load configuration file: " + config_file);
+            return false;
+        }
         
+        // Validate configuration
+        if (!config_manager_->validate_config()) {
+            LOG_ERROR("Configuration validation failed");
+            auto errors = config_manager_->get_validation_errors();
+            for (const auto& error : errors) {
+                LOG_ERROR("Config error: " + error);
+            }
+            return false;
+        }
+        
+        LOG_INFO("Configuration loaded and validated successfully");
         return true;
     }
     
@@ -33,14 +52,63 @@ public:
         }
         
         LOG_INFO("Starting VPN server...");
+        
+        // Get configuration values
+        std::string bind_address = config_manager_->get<std::string>("server.bind_address", "0.0.0.0");
+        int port = config_manager_->get<int>("server.port", 1194);
+        std::string tun_device = config_manager_->get<std::string>("server.tun_device", "flunk0");
+        std::string vpn_subnet = config_manager_->get<std::string>("server.vpn_subnet", "10.8.0.0/24");
+        std::string vpn_gateway = config_manager_->get<std::string>("server.vpn_gateway", "10.8.0.1");
+        
+        // Create and configure TUN interface
+        LOG_INFO("Creating TUN interface: " + tun_device);
+        if (!tun_interface_->create_interface(tun_device)) {
+            LOG_ERROR("Failed to create TUN interface");
+            return false;
+        }
+        
+        // Extract IP and netmask from subnet
+        size_t slash_pos = vpn_subnet.find('/');
+        if (slash_pos == std::string::npos) {
+            LOG_ERROR("Invalid VPN subnet format: " + vpn_subnet);
+            return false;
+        }
+        
+        std::string netmask = vpn_subnet.substr(slash_pos + 1);
+        
+        // Configure TUN interface IP
+        if (!tun_interface_->configure_ip(vpn_gateway, netmask)) {
+            LOG_ERROR("Failed to configure TUN interface IP");
+            return false;
+        }
+        
+        // Bring up TUN interface
+        if (!tun_interface_->bring_up()) {
+            LOG_ERROR("Failed to bring up TUN interface");
+            return false;
+        }
+        
+        LOG_INFO("TUN interface " + tun_interface_->get_interface_name() + " created and configured");
+        
+        // Create listening socket
+        NetworkEndpoint endpoint;
+        endpoint.host = bind_address;
+        endpoint.port = static_cast<uint16_t>(port);
+        endpoint.protocol = ProtocolType::UDP;
+        
+        LOG_INFO("Binding to " + bind_address + ":" + std::to_string(port));
+        if (!network_manager_->bind(endpoint)) {
+            LOG_ERROR("Failed to bind to " + bind_address + ":" + std::to_string(port));
+            return false;
+        }
+        
         running_ = true;
         start_time_ = time(nullptr);
         
-        // TODO: Create listening socket
-        // TODO: Start client acceptance thread
-        // TODO: Initialize tunnel interface
+        // Start server thread for handling clients
+        server_thread_ = std::thread(&Impl::server_worker, this);
         
-        LOG_INFO("VPN server started successfully");
+        LOG_INFO("VPN server started successfully on " + bind_address + ":" + std::to_string(port));
         return true;
     }
     
@@ -52,9 +120,28 @@ public:
         LOG_INFO("Stopping VPN server...");
         running_ = false;
         
-        // TODO: Stop accepting new connections
-        // TODO: Gracefully disconnect all clients
-        // TODO: Cleanup network resources
+        // Stop network manager
+        if (network_manager_) {
+            network_manager_->disconnect();
+        }
+        
+        // Bring down TUN interface
+        if (tun_interface_) {
+            tun_interface_->bring_down();
+        }
+        
+        // Wait for server thread to finish
+        if (server_thread_.joinable()) {
+            server_thread_.join();
+        }
+        
+        // Disconnect all clients
+        for (auto& client : active_clients_) {
+            if (client) {
+                client->disconnect();
+            }
+        }
+        active_clients_.clear();
         
         LOG_INFO("VPN server stopped");
     }
@@ -84,10 +171,44 @@ private:
     std::string config_file_;
     time_t start_time_;
     
+    // Core components
+    std::unique_ptr<ConfigManager> config_manager_;
+    std::unique_ptr<NetworkManager> network_manager_;
+    std::unique_ptr<TunInterface> tun_interface_;
+    
+    // Threading
+    std::thread server_thread_;
+    
+    // Client management
+    std::vector<std::unique_ptr<ClientConnection>> active_clients_;
+    std::mutex clients_mutex_;
+    
     // Statistics
     std::atomic<uint64_t> total_clients_served_{0};
     std::atomic<uint64_t> current_active_clients_{0};
     std::atomic<uint64_t> total_bytes_transferred_{0};
+    
+    void server_worker() {
+        LOG_INFO("Server worker thread started");
+        
+        uint8_t buffer[4096];
+        while (running_) {
+            // Simple UDP packet reception for now
+            ssize_t bytes_received = network_manager_->receive(buffer, sizeof(buffer));
+            if (bytes_received > 0) {
+                LOG_DEBUG("Received " + std::to_string(bytes_received) + " bytes from client");
+                total_bytes_transferred_ += bytes_received;
+                
+                // Echo back for testing (TODO: Implement proper VPN protocol)
+                network_manager_->send(buffer, bytes_received);
+            } else if (bytes_received < 0) {
+                // Non-blocking socket would return -1 with EAGAIN/EWOULDBLOCK
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        
+        LOG_INFO("Server worker thread stopped");
+    }
 };
 
 // VPNServer implementation

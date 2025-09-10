@@ -101,6 +101,8 @@ bool ConfigManager::load_from_file(const std::string& config_path) {
     }
     
     std::string line;
+    std::string current_section;
+    
     while (std::getline(file, line)) {
         line = pimpl->trim(line);
         
@@ -109,8 +111,17 @@ bool ConfigManager::load_from_file(const std::string& config_path) {
             continue;
         }
         
+        // Check for section header [section_name]
+        if (line.front() == '[' && line.back() == ']') {
+            current_section = line.substr(1, line.length() - 2);
+            continue;
+        }
+        
         auto [key, value] = pimpl->parse_line(line);
         if (!key.empty() && !value.empty()) {
+            // Prefix key with section name if we're in a section
+            std::string full_key = current_section.empty() ? key : current_section + "." + key;
+            
             ConfigValue parsed_value = pimpl->parse_value(value);
             if (pimpl->env_substitution_enabled) {
                 if (std::holds_alternative<std::string>(parsed_value)) {
@@ -118,7 +129,7 @@ bool ConfigManager::load_from_file(const std::string& config_path) {
                     parsed_value = substitute_env_vars(str_val);
                 }
             }
-            pimpl->config_map[key] = parsed_value;
+            pimpl->config_map[full_key] = parsed_value;
         }
     }
     

@@ -6,6 +6,7 @@ add_library(flunk_common STATIC
     src/utils.cpp
     src/logger.cpp
     src/config.cpp
+    src/network.cpp
 )
 
 target_include_directories(flunk_common PUBLIC
