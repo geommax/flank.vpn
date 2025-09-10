@@ -15,6 +15,7 @@
   - Status: ✅ COMPLETE
   - Files: `common/src/network.cpp`, `server/src/vpn_server.cpp`, `client/src/vpn_client.cpp`
   - Test: `sudo ./build/server/flunk_server -v` + `sudo ./build/client/flunk_client connect -s 127.0.0.1 -u testuser -v`
+  - Note: Client successfully sends UDP packets using sendto(), server receive pending
 
 - [x] **TUN Interface Management** - Both server and client TUN creation
   - Status: ✅ COMPLETE
@@ -153,11 +154,15 @@
 
 - [x] **Client Connection** - `sudo ./build/client/flunk_client connect -s 127.0.0.1 -u testuser -v`
   - Expected: Handshake exchange, client TUN created
-  - Result: ✅ WORKING
+  - Result: ✅ WORKING (local), ⚠️ PARTIAL (remote - sends packets, no server response)
 
 - [x] **Interface Verification** - `ip addr show flunk0` and `ip addr show flunk-client`
   - Expected: Both interfaces UP with correct IPs
   - Result: ✅ WORKING
+
+- [x] **UDP Packet Transmission** - Client sends hello packets to server
+  - Expected: Successful packet send without "Destination address required" error
+  - Result: ✅ WORKING (54 bytes sent successfully)
 
 ### Pending Tests
 - [ ] **Actual VPN Traffic** - Route internet traffic through tunnel

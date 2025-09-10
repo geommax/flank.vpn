@@ -4,8 +4,21 @@
 
 # Example users (password: "password123")
 admin:$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBdXFS5/k2OdK6
-user1:$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBdXFS5/k2OdK6
-user2:$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBdXFS5/k2OdK6
+# FlunkVPN Users Configuration
+# Format: username:password
+# Lines starting with # are comments
+# Empty lines are ignored
+
+# Example users (change these passwords!):
+rom:password123
+testuser:testpass
+admin:admin123
+client1:secret456
+client2:mysecret789
+
+# Add your users below:
+# user1:mypassword
+# user2:anotherpassword
 testuser:$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBdXFS5/k2OdK6
 
 # Production users should have unique, strong passwords

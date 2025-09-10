@@ -7,6 +7,9 @@
 #include <thread>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
+#include <fstream>
+#include <string>
 
 namespace flunk {
 
@@ -42,6 +45,13 @@ public:
         }
         
         LOG_INFO("Configuration loaded and validated successfully");
+        
+        // Load user database
+        if (!load_users()) {
+            LOG_ERROR("Failed to load user database");
+            return false;
+        }
+        
         return true;
     }
     
@@ -188,6 +198,76 @@ private:
     std::atomic<uint64_t> current_active_clients_{0};
     std::atomic<uint64_t> total_bytes_transferred_{0};
     
+    // Simple user database for authentication
+    std::unordered_map<std::string, std::string> user_database_;
+    
+    bool load_users() {
+        std::string users_file = "/etc/flunk_vpn/users.txt";
+        std::ifstream file(users_file);
+        
+        if (!file.is_open()) {
+            LOG_ERROR("Failed to open users file: " + users_file);
+            LOG_ERROR("Please create the file with format: username:password (one per line)");
+            return false;
+        }
+        
+        user_database_.clear();
+        std::string line;
+        int line_number = 0;
+        
+        while (std::getline(file, line)) {
+            line_number++;
+            
+            // Skip empty lines and comments
+            if (line.empty() || line[0] == '#') {
+                continue;
+            }
+            
+            // Parse username:password format
+            size_t colon_pos = line.find(':');
+            if (colon_pos == std::string::npos) {
+                LOG_WARN("Invalid format in users.txt line " + std::to_string(line_number) + ": " + line);
+                continue;
+            }
+            
+            std::string username = line.substr(0, colon_pos);
+            std::string password = line.substr(colon_pos + 1);
+            
+            // Trim whitespace
+            username.erase(0, username.find_first_not_of(" \t"));
+            username.erase(username.find_last_not_of(" \t") + 1);
+            password.erase(0, password.find_first_not_of(" \t"));
+            password.erase(password.find_last_not_of(" \t") + 1);
+            
+            if (!username.empty() && !password.empty()) {
+                user_database_[username] = password;
+                LOG_DEBUG("Loaded user: " + username);
+            } else {
+                LOG_WARN("Empty username or password in line " + std::to_string(line_number));
+            }
+        }
+        
+        file.close();
+        
+        if (user_database_.empty()) {
+            LOG_ERROR("No valid users loaded from " + users_file);
+            return false;
+        }
+        
+        LOG_INFO("Loaded " + std::to_string(user_database_.size()) + " users from " + users_file);
+        return true;
+    }
+    
+    bool authenticate_user(const std::string& username, const std::string& password) {
+        auto it = user_database_.find(username);
+        if (it != user_database_.end() && it->second == password) {
+            LOG_INFO("User " + username + " authenticated successfully");
+            return true;
+        }
+        LOG_WARN("Authentication failed for user: " + username);
+        return false;
+    }
+    
     void server_worker() {
         LOG_INFO("Server worker thread started");
         
@@ -210,16 +290,40 @@ private:
                         if (!packet_data.empty()) {
                             std::string hello_msg(packet_data.begin(), packet_data.end());
                             LOG_INFO("Client hello: " + hello_msg);
+                            
+                            // Parse username and password from hello message
+                            // Format: FLUNK_CLIENT_HELLO:username:password
+                            size_t first_colon = hello_msg.find(':');
+                            size_t second_colon = hello_msg.find(':', first_colon + 1);
+                            
+                            if (first_colon != std::string::npos && second_colon != std::string::npos) {
+                                std::string username = hello_msg.substr(first_colon + 1, second_colon - first_colon - 1);
+                                std::string password = hello_msg.substr(second_colon + 1);
+                                
+                                if (authenticate_user(username, password)) {
+                                    // Authentication successful
+                                    std::string response = "FLUNK_SERVER_HELLO:AUTH_SUCCESS:10.8.0." + std::to_string(10 + current_active_clients_);
+                                    std::vector<uint8_t> response_data(response.begin(), response.end());
+                                    network_manager_->send_packet(response_data, PacketType::HANDSHAKE_RESPONSE, header.sequence + 1);
+                                    
+                                    current_active_clients_ = 1; // Simple single-client handling for now
+                                    total_clients_served_++;
+                                    LOG_INFO("Authentication successful, sent welcome to " + username);
+                                } else {
+                                    // Authentication failed
+                                    std::string response = "FLUNK_SERVER_HELLO:AUTH_FAILED:Invalid credentials";
+                                    std::vector<uint8_t> response_data(response.begin(), response.end());
+                                    network_manager_->send_packet(response_data, PacketType::ERROR, header.sequence + 1);
+                                    LOG_WARN("Authentication failed for " + username);
+                                }
+                            } else {
+                                // Invalid message format
+                                std::string response = "FLUNK_SERVER_HELLO:AUTH_FAILED:Invalid message format";
+                                std::vector<uint8_t> response_data(response.begin(), response.end());
+                                network_manager_->send_packet(response_data, PacketType::ERROR, header.sequence + 1);
+                                LOG_WARN("Invalid handshake message format");
+                            }
                         }
-                        
-                        // Send handshake response
-                        std::string response = "FLUNK_SERVER_HELLO:Welcome";
-                        std::vector<uint8_t> response_data(response.begin(), response.end());
-                        network_manager_->send_packet(response_data, PacketType::HANDSHAKE_RESPONSE, header.sequence + 1);
-                        
-                        current_active_clients_ = 1; // Simple single-client handling for now
-                        total_clients_served_++;
-                        LOG_INFO("Sent handshake response to client");
                         break;
                     }
                     
